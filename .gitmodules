@@ -1,0 +1,3 @@
+[submodule "tools/rk2918_tools"]
+	path = tools/rk2918_tools
+	url = https://github.com/oxdeadbeef/rk2918_tools.git
