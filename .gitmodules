@@ -1,3 +1,6 @@
 [submodule "tools/rk2918_tools"]
 	path = tools/rk2918_tools
 	url = https://github.com/oxdeadbeef/rk2918_tools.git
+[submodule "tools/squashfs-tools"]
+	path = tools/squashfs-tools
+	url = https://github.com/pieceofsummer/squashfs-tools.git
