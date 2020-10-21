@@ -51,7 +51,7 @@ parser.add_argument("--list", "-l",
     help="List default firmwares")
 parser.add_argument("--dry-run", "-n",
     action="store_true", dest="dryrun", default=False,
-    help="List default firmwares")
+    help="Dryrun - Don't actually get anything. Just print")
 
 options = vars(parser.parse_args())
 
