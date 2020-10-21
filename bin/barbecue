@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+#
+# barbecue
+#
+# Download firmware sauces
+#
+# Author: oxdeadbeef <oxdeadbeef@pit-of-despair.com>
+#
+import requests
+from urllib.parse import urlparse
+import argparse
+from bs4 import BeautifulSoup
+import os
+import logging
+import shutil
+
+logging.basicConfig(format='[%(asctime)s] %(levelname)s %(message)s', datefmt='%Y/%m/%d %I:%M:%S %z')
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+default_firmwares = (
+    'ha8800_production',
+    'ha8801_production',
+    'ha2810_production'
+)
+default_firmware = default_firmwares[0]
+
+firmware = []
+parser = argparse.ArgumentParser(description='Download Atgames firmwares')
+parser.add_argument("-v", "--verbose", 
+    action="store_true", dest="verbose", default=False,
+    help="Enable verbose logging")
+parser.add_argument("-q", "--quiet",
+    action="store_false", dest="verbose", default=True,
+    help="don't print status messages to stdout")
+parser.add_argument("--all", "-a",
+    action="store_true", dest="download_all", default=False,
+    help="download all known firmwares")
+parser.add_argument("-p", "--firmware",
+    action="append", dest="firmware",  default=[],
+    help="Specify firmware")
+parser.add_argument("--previous",
+    action="store_true", dest="get_previous", default=False,
+    help="Download previous firmware")
+parser.add_argument("--overwrite", "-o",
+    action="store_true", dest="overwrite", default=False,
+    help="Force overwrite")
+parser.add_argument("--list", "-l",
+    action="store_true", dest="list_firmwares", default=False,
+    help="List default firmwares")
+parser.add_argument("--dry-run", "-n",
+    action="store_true", dest="dryrun", default=False,
+    help="List default firmwares")
+
+options = vars(parser.parse_args())
+
+if options['verbose']:
+    logging.setLevel(logging.DEBUG)
+    
+if options['download_all']:
+    firmwares = default_firmwares
+else:
+    firmwares = [ default_firmwares[0] ]
+
+if len(options['firmware']):
+    firmwares = options['firmware']
+
+if options['list_firmwares']:
+    for i in firmwares:
+        print(i)
+    exit(0)
+
+firmware_url_template = 'https://retro-api.atgames.net/api/v2/apps/{}/latest_firmware.html'
+
+options['basedir'] = os.getcwd()
+
+for firmware in firmwares:
+    app_url = firmware_url_template.format(firmware)
+    payload = { 'previous' : "true" } if options['get_previous'] else {}
+   
+    try:
+        res = requests.get(app_url, params=payload)
+    except requests.exceptions.RequestException as e:
+        logger.error(e.response.text)
+        continue
+
+    if res.status_code == requests.codes.ok:
+        soup = BeautifulSoup(res.text, 'html.parser')
+        firmware_url = urlparse(soup.a.get('href'))
+        file = os.path.basename(firmware_url.path)
+        firmware_dir = os.path.join(options['basedir'], firmware)
+        firmware_file = os.path.join(firmware_dir, file)
+
+        if options['dryrun']:
+            logger.info('Fetch {}'.format(firmware_url.geturl()))
+            continue
+
+        if os.path.exists(firmware_dir):
+            logger.warning('Directory {} already exists'.format(firmware_dir))
+        else:
+            os.mkdir(firmware_dir, mode=0o0755)
+        
+        if os.path.exists(firmware_file) and not options['overwrite']:
+            logger.warning('Firmware {} already exists'.format(firmware_file))
+            continue
+        else:
+            logger.info('Downloading {} -> {}'.format(firmware_url.geturl(), firmware_file))
+            try:
+                r = requests.get(firmware_url.geturl(), stream=True)
+                f = open(firmware_file, 'wb')
+                shutil.copyfileobj(r.raw, f)
+
+            except Exception as e:
+                logger.error(e)
+                continue
+
+        logger.info('Downloaded {} size={}'.format(firmware_file, os.path.getsize(firmware_file)))
+    else:
+        logger.error(res.text)
