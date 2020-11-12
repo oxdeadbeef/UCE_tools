@@ -9,57 +9,415 @@
 import requests
 from urllib.parse import urlparse
 import argparse
-from bs4 import BeautifulSoup
 import os
 import logging
 import shutil
+import hashlib
+import json
+import re
+
+VERSION = '1.1'
 
 logging.basicConfig(format='[%(asctime)s] %(levelname)s %(message)s', datefmt='%Y/%m/%d %I:%M:%S %z')
-
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+firmware_url_template = 'https://retro-api.atgames.net/api/v2/apps/{}/latest_firmware'
+
+model_lookup = {
+    'ha8800' : 'ALU v1.0',
+    'ha8801' : 'ALU v1.1',
+    'ha2810' : 'ALU Gamer Pro',
+}
+
+default_models = (
+    'ha8800',
+    'ha8801',
+    'ha2810',
+)
+default_model = default_models[0]
+
+default_releases = (
+    'production',
+    'qa'
+)
+default_release = default_releases[0]
+
+default_firmware = default_model + '_' + default_release
+
+alt_model_lookup = {
+    'ha8810' : 'Unknown HA88XX',
+    'ip1080' : 'Unknown IPXXXX',
+    'hab800' : 'Unknown HAB8XX',
+    'hab801' : 'Unknown HAB8XX',
+}
+
+alt_firmwares = (
+    'ha8810_production',
+    'ha8810_qa',
+    'ip1080_production',
+    'ip1080_qa',
+    'hab800_production',
+    'hab800_qa',
+    'hab801_production',
+    'hab801_qa',
+    'ha8800_backup',
+    'ha8800_bd',
+    'ha8800_su',
+    'ha8800_ch',
+    'ha8800_lc',
+    'ha8800_tw',
+)
 
 default_firmwares = (
     'ha8800_production',
     'ha8801_production',
-    'ha2810_production'
+    'ha2810_production',
 )
+
 default_firmware = default_firmwares[0]
 
 firmware = []
+options = {}
+
+def downloadMeta(firmware):
+    payload = {}
+    firmware_url = firmware_url_template.format(firmware)
+
+    if options['get_previous']:
+        payload = { 'previous' : "true" } 
+   
+    try:
+        res = requests.get(firmware_url, params=payload)
+    except requests.exceptions.RequestException as e:
+        logger.error(e.response.text)
+        return None
+
+    if res.status_code == requests.codes.ok:
+        if 'application/json' in res.headers.get('content-type'):
+            return res.json()
+        else:
+            logger.error('META @ {} was not JSON'.format(firmware_url))
+            return None
+    
+def fetchFirmware(firmware):
+    result = None
+
+    model_info = modelFromFirmware(firmware)
+    meta = downloadMeta(firmware)
+
+    if meta is None:
+        logger.error('Filed to downaload META for {}'.format(firmware))
+        return None
+
+    file = meta['filename']
+    firmware_dir = os.path.join(options['basedir'], firmware)
+    firmware_file = os.path.join(firmware_dir, file)
+    firmware_meta = firmware_file + '.meta'
+    firmware_size = meta['size']
+    firmware_url = meta['url']
+    firmware_checksum = meta['checksum']
+    firmware_version = meta['versionNumber']
+
+    if options['verbose']:
+        logger.info('MODEL = {}'.format(model_info[0]))
+        logger.info('RELEASE = {}'.format(model_info[1]))
+        logger.info('FIRMWARE = {}'.format(firmware))
+        logger.info('FILE = {}'.format(file))
+        logger.info('DEST = {}'.format(firmware_dir))
+        logger.info('SIZE = {}'.format(firmware_size))
+        logger.info('CHECKSUM = {}'.format(firmware_checksum))
+        logger.info('VERSION = {}'.format(firmware_version))
+        logger.debug('URL = {}'.format(meta['url']))
+
+        logger.info('Fetching  {} {}'.format(firmware_url, '(DRYRUN)' if options['dryrun'] else ''))
+        if options['dryrun']:
+            return
+
+    if os.path.exists(firmware_dir):
+        logger.warning('Directory {} already exists'.format(firmware_dir))
+    else:
+        try:
+            os.mkdir(firmware_dir, mode=0o0755)
+        except OSError as e:
+            if e.errno in (errno.EROFS, errno.ENOSPC, errno.EACCES):
+                log.error('Failed to create directory {}: {}'.format(firmware_dir, os.strerror(e.errno)))
+                return
+    
+    if os.path.exists(firmware_file) and not options['overwrite']:
+        if options['verify']:
+            result = True
+        else:
+            logger.warning('Firmware {} already exists'.format(firmware_file))
+            return
+    else:
+        result = downloadFirmware(firmware_url, firmware_file)
+
+    if result is None:
+        logger.error('Failed to download FIRMWARE \'{}\''.format(firmware))
+        return
+    
+    filesize = os.stat(firmware_file).st_size
+
+    if meta['size'] == filesize:
+        logger.info('Downloaded {} size={}'.format(firmware_file, filesize))
+    else:
+        logger.error('Downloaded filesize MISMATCH for {}: got {} expected {}'.format(firmware_file, filesize, firmware_size))
+        logger.warning('Removing {}'.format(firmware_file))
+        os.remove(firmware_file)
+        return
+
+        writeMeta(firmware_meta, meta)
+    
+    logger.info('Wrote META FILE {}'.format(firmware_meta))
+    
+    result = verifyFirmware(firmware_file, meta) 
+    if result is False:
+        logger.error('FIRMWARE {} RELEASE {}: FAILED'.format(firmware, firmware_version))
+        logger.info('Removing FIRMWARE and META')
+        try:
+            os.remove(firmware_file)
+            os.remove(firmware_meta)
+        except OSError as e:
+            logger.error('Failed to remove FIRWMWARE AND META: {}'.format(e))
+            return
+    if result is True:
+        logger.info('FIRMWARE {} RELEASE {}: OK'.format(firmware, firmware_version))
+
+def verifyFirmware(file, meta):
+
+    if 'checksum' not in meta:
+        logger.error('META for {} does not contain a \'checksum\''.format(file))
+        return None
+
+    if 'chunks' in meta:
+        return verifyFirmwareChunked(file, meta)
+ 
+    if 'checksum' in meta:
+        return verifyFirmwareMD5(file,meta)
+
+    return None
+
+def checksumChunk(f, chunksize):
+
+    try:
+        buffer = f.read(chunksize)
+    except OSError as e:
+        log.debug('READ Exception: {}'.format(e))
+
+    md5_obj = hashlib.md5()
+    md5_obj.update(buffer)
+    return md5_obj.hexdigest()
+
+def verifyFirmwareChunked(file, meta):
+
+    status = True
+    chunksize = meta['chunkSize']
+    num_chunks = meta['chunks'][-1]['index']
+    logger.debug('CHUNKSIZE = {}'.format(chunksize))
+    logger.debug('NUMCHUNKS = {}'.format(num_chunks))
+
+    try:
+        with open(file, 'rb') as f:
+            for chunk in meta['chunks']:
+                current_chunk = chunk['index']
+                current_checksum = chunk['checksum']
+                current_range = chunk['range']
+                if options['debug']:
+                    logger.debug('INDEX = {}'.format(current_chunk))
+                    logger.debug('CHECKSUM = {}'.format(current_checksum))
+                    logger.debug('RANGE = {}'.format(current_range))
+
+                h = checksumChunk(f, chunksize)
+
+                if h == current_checksum:
+                    if options['debug']:
+                        logger.debug('CHUNK HASH: ({}/{}) OK'.format(current_chunk, num_chunks))
+                else:
+                    if options['debug']:
+                        logger.error('CHUNK HASH ({}/{}) FAILED: expected {} got {}'.format(
+                            current_chunk, num_chunks, current_checksum, h))
+                    status = False
+                    break
+
+    except IOError as e:
+        logger.error('Processing CHUNKED Hashes for {}: {}'.format(file, e))
+        status = False
+
+    return status
+
+def verifyFirmwareMD5(file, meta):
+    status = True
+    current_checksum = meta['checksum']
+
+    try:
+        md5_hash = generateMD5Hash(file)
+        if current_checksum == md5_hash:
+                logger.info('Checksum: {} OK'.format(file, current_checksum))
+        else:
+            status = False
+            logger.error('Checksum: {} FAILED: got {} expected {}'.format(file, md5_hash, current_checksum))
+    except IOError as e:
+        logger.error('Generating MD5 Checksum on {}: {}'.format(file, e))
+        return False
+    return status
+
+def downloadFirmware(url, file):
+    
+    logger.debug('Downloading FIRMWARE: {} -> {}'.format(url, file))
+
+    try:
+        r = requests.get(url, stream=True)
+        with open(file, 'wb') as f:
+            shutil.copyfileobj(r.raw, f)
+            f.flush()
+    except Exception as e:
+        logger.error('Failed to download FIRMWARE {}: {}'.format(file, e))
+        logger.warning('Removing {}'.format(file))
+        os.remove(file)
+        return False
+    return True
+
+def generateMD5Hash(file):
+    return hashlib.md5(open(file,'rb').read()).hexdigest()
+
+def linkFirwareToVersion(file, meta):
+    pass
+
+def writeMeta(file, meta):
+    try:
+        with open(file, 'w') as f:
+            json.dump(meta, f)
+            f.close()
+    except IOError as e:
+        logger.error('Failed to write META {}: {}'.format(file, e))
+        return False
+    return True
+
+# def readMeta(file):
+#     if ! os.path.exists(file):
+#         logger.error()
+
+# def coalesce(*arg):
+#     return reduce(lambda x, y: x if x is not None else y, arg)
+
+def coalesce(*arg):
+  for el in arg:
+    if el is not None:
+      return el
+  return None
+
+def modelFromFirmware(firmware):
+    return re.split('_',firmware,2) 
+
+def firmwareFromModelRelease(model, release):
+    return model + '_' + release
+
+#
+# main
+#
+
+os.umask(0o022)
+
 parser = argparse.ArgumentParser(description='Download Atgames firmwares')
-parser.add_argument("-v", "--verbose", 
-    action="store_true", dest="verbose", default=False,
-    help="Enable verbose logging")
-parser.add_argument("-q", "--quiet",
-    action="store_false", dest="verbose", default=True,
-    help="don't print status messages to stdout")
-parser.add_argument("--all", "-a",
-    action="store_true", dest="download_all", default=False,
-    help="download all known firmwares")
-parser.add_argument("-p", "--firmware",
-    action="append", dest="firmware",  default=[],
-    help="Specify firmware")
-parser.add_argument("--previous",
-    action="store_true", dest="get_previous", default=False,
-    help="Download previous firmware")
-parser.add_argument("--overwrite", "-o",
-    action="store_true", dest="overwrite", default=False,
-    help="Force overwrite")
-parser.add_argument("--list", "-l",
-    action="store_true", dest="list_firmwares", default=False,
-    help="List default firmwares")
-parser.add_argument("--dry-run", "-n",
-    action="store_true", dest="dryrun", default=False,
-    help="Dryrun - Don't actually get anything. Just print")
+parser.add_argument('--verbose', '-v',
+    action='store_true', dest='verbose', default=False,
+    help='Enable verbose logging')
+
+parser.add_argument('--debug', '-X',
+    action='store_true', dest='debug', default=False,
+    help='Enable debug logging')
+
+parser.add_argument('-q', '--quiet',
+    action='store_false', dest='verbose', default=True,
+    help='Do not print status messages to stdout')
+
+parser.add_argument('--model',  '-m',
+    action='store', dest='model', default=default_model,
+    help='ALU Model (default: %(default)s)')
+
+parser.add_argument('--release',  '-r',
+    action='store', dest='release', default=default_release,
+    help='ALU Release (default: %(default)s)')
+
+parser.add_argument('--previous',
+    action='store_true', dest='get_previous', default=False,
+    help='Download previous firmware (default: %(default)s)')
+
+parser.add_argument('--overwrite', '-o',
+    action='store_true', dest='overwrite', default=False,
+    help='Force overwrite (default: %(default)s)')
+
+parser.add_argument('--dry-run', '-n',
+    action='store_true', dest='dryrun', default=False,
+    help='Dryrun')
+
+parser.add_argument('--basedir', '-b',
+    action='store', dest='basedir', default=os.getcwd(),
+    help='Base directory to work from (default: %(default)s)')
+
+parser.add_argument('--verify', 
+    action='store_true', dest='verify', default=False,
+    help='Verify firmwares (default: %(default)s)')
+
+parser.add_argument('--version', action='version', version='%(prog)s {} - so yummy'.format(VERSION))
+
+parser.add_argument('-p', '--firmware',
+    action='append', dest='firmware',  default=[],
+    help='Specify firmware')
+
+parser.add_argument('--all', '-a',
+    action='store_true', dest='download_all', default=False,
+    help='download all known firmwares')
+
+parser.add_argument('--list', '-l',
+    action='store_true', dest='list_firmwares', default=False,
+    help='List default firmwares')
+
+parser.add_argument('--list-models',
+    action='store_true', dest='list_models', default=False,
+    help='List models')
+
+parser.add_argument('--alt',
+    action='store_true', dest='alternatives', default=False,
+    help='Show Alternative Information')
+
+parser.add_argument('--output', '-O',
+    action='store', dest='output', default=None,
+    help='Output to a file')
 
 options = vars(parser.parse_args())
 
+if options['output'] is not None:
+    logging.basicConfig(
+        format='[%(asctime)s] %(levelname)s %(message)s',
+        datefmt='%Y/%m/%d %I:%M:%S %z',
+        encoding='utf-8',
+        level=logging.DEBUG,
+        filename=options['output'],
+        filemode='w')
+    print("LOGGING TO FILE")
+else:
+    print("LOGGING TO SCREEN")
+    logging.basicConfig(format='[%(asctime)s] %(levelname)s %(message)s', datefmt='%Y/%m/%d %I:%M:%S %z')
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+logging.info("Hello")
+if options['list_models']:
+    if options['alternatives']:
+        model_lookup.update(alt_model_lookup)
+    for model, desc in model_lookup.items():
+        print("{}: {}".format(model, desc))
+    exit(0)
+
 if options['verbose']:
-    logging.setLevel(logging.DEBUG)
+    logger.setLevel(logging.DEBUG)
     
 if options['download_all']:
     firmwares = default_firmwares
+    if options['alternatives']:
+        firmwares += alt_firmwares
 else:
     firmwares = [ default_firmwares[0] ]
 
@@ -71,50 +429,10 @@ if options['list_firmwares']:
         print(i)
     exit(0)
 
-firmware_url_template = 'https://retro-api.atgames.net/api/v2/apps/{}/latest_firmware.html'
-
-options['basedir'] = os.getcwd()
+options['basedir'] = coalesce(os.environ.get('SAUCERY_BASE'), options['basedir'], None)
 
 for firmware in firmwares:
-    app_url = firmware_url_template.format(firmware)
-    payload = { 'previous' : "true" } if options['get_previous'] else {}
-   
-    try:
-        res = requests.get(app_url, params=payload)
-    except requests.exceptions.RequestException as e:
-        logger.error(e.response.text)
-        continue
+    fetchFirmware(firmware)
 
-    if res.status_code == requests.codes.ok:
-        soup = BeautifulSoup(res.text, 'html.parser')
-        firmware_url = urlparse(soup.a.get('href'))
-        file = os.path.basename(firmware_url.path)
-        firmware_dir = os.path.join(options['basedir'], firmware)
-        firmware_file = os.path.join(firmware_dir, file)
-
-        if options['dryrun']:
-            logger.info('Fetch {}'.format(firmware_url.geturl()))
-            continue
-
-        if os.path.exists(firmware_dir):
-            logger.warning('Directory {} already exists'.format(firmware_dir))
-        else:
-            os.mkdir(firmware_dir, mode=0o0755)
-        
-        if os.path.exists(firmware_file) and not options['overwrite']:
-            logger.warning('Firmware {} already exists'.format(firmware_file))
-            continue
-        else:
-            logger.info('Downloading {} -> {}'.format(firmware_url.geturl(), firmware_file))
-            try:
-                r = requests.get(firmware_url.geturl(), stream=True)
-                f = open(firmware_file, 'wb')
-                shutil.copyfileobj(r.raw, f)
-
-            except Exception as e:
-                logger.error(e)
-                continue
-
-        logger.info('Downloaded {} size={}'.format(firmware_file, os.path.getsize(firmware_file)))
-    else:
-        logger.error(res.text)
+# if __name__== "__main__":
+#     main()
