@@ -144,7 +144,7 @@ def fetchFirmware(firmware):
             os.makedirs(firmware_dir, mode=0o0755)
         except OSError as e:
             if e.errno in (errno.EROFS, errno.ENOSPC, errno.EACCES):
-                log.error('Failed to create directory {}: {}'.format(firmware_dir, os.strerror(e.errno)))
+                logger.error('Failed to create directory {}: {}'.format(firmware_dir, os.strerror(e.errno)))
                 return
     
     if os.path.exists(firmware_file) and not options['overwrite']:
@@ -170,7 +170,7 @@ def fetchFirmware(firmware):
         os.remove(firmware_file)
         return
 
-        writeMeta(firmware_meta, meta)
+    writeMeta(firmware_meta, meta)
     
     logger.info('Wrote META FILE {}'.format(firmware_meta))
     
@@ -202,11 +202,11 @@ def verifyFirmware(file, meta):
     return None
 
 def checksumChunk(f, chunksize):
-
+    buffer = ''
     try:
         buffer = f.read(chunksize)
     except OSError as e:
-        log.debug('READ Exception: {}'.format(e))
+        logger.debug('READ Exception: {}'.format(e))
 
     md5_obj = hashlib.md5()
     md5_obj.update(buffer)
