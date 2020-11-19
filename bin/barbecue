@@ -125,6 +125,7 @@ def fetchFirmware(firmware):
     firmware_version = meta['versionNumber']
 
     if options['verbose']:
+        logger.info('SERVER = {}'.format(options['server']))
         logger.info('MODEL = {}'.format(model_info[0]))
         logger.info('RELEASE = {}'.format(model_info[1]))
         logger.info('FIRMWARE = {}'.format(firmware))
