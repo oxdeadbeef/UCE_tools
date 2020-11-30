@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 #
-# barbecue
+# fish sauce
 #
-# Download firmware sauces
+# Download appstore apps 
 #
 # Author: oxdeadbeef <oxdeadbeef@pit-of-despair.com>
 #
@@ -16,50 +16,26 @@ import hashlib
 import json
 import re
 import errno
+import uuid
 
-VERSION = '1.2'
+VERSION = '1.0'
 
 logging.basicConfig(format='[%(asctime)s] %(levelname)s %(message)s', datefmt='%Y/%m/%d %I:%M:%S %z')
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-firmware_urls = {
-    'prod': 'https://retro-api.atgames.net/api/v2/apps/{}/latest_firmware',
-    'staging' : 'https://retro-api-staging.atgames.net/api/v2/apps/{}/latest_firmware',
-    'dev': 'https://retro-api-dev.atgames.net/api/v2/apps/{}/latest_firmware',
+appstore_urls = {
+    'prod': 'https://retro-api.atgames.net/api/v2/lu_apps?uuid={}',
+    'staging' : 'https://retro-api-staging.atgames.net/api/v2/lu_apps?uuid={}',
+    'dev': 'https://retro-api-dev.atgames.net/api/v2/luapps?uuid={}',
 }
 
-model_lookup = {
-    'ha8800' : 'ALU v1.0',
-    'ha8801' : 'ALU v1.1',
-    'ha2810' : 'ALU Gamer Pro',
-}
+default_urls = appstore_urls
 
-default_models = (
-    'ha8800',
-    'ha8801',
-    'ha2810',
-)
-default_model = default_models[0]
+apps = []
+options = {}
 
-default_releases = (
-    'production',
-    'qa'
-)
-default_release = default_releases[0]
-
-default_firmware = default_model + '_' + default_release
-
-alt_model_lookup = {
-    'ha8810' : 'Unknown HA88XX',
-    'ip1080' : 'Unknown IPXXXX',
-    'hab800' : 'Unknown HAB8XX',
-    'hab801' : 'Unknown HAB8XX',
-}
-
-alt_firmwares = (
-    'ha8810_production',
-    'ha8810_qa',def queryJsonEndpoint(uri, payload={}):
+def queryJsonEndpoint(uri, payload={}):
 
     try:
         res = requests.get(uri, params=payload)
@@ -72,50 +48,6 @@ alt_firmwares = (
             return res.json()
         else:
             logger.error('{} was not JSON'.format(uri))
-            return None
-    'ip1080_production',
-    'ip1080_qa',
-    'hab800_production',
-    'hab800_qa',
-    'hab801_production',
-    'hab801_qa',
-    'ha8800_backup',
-    'ha8800_bd',
-    'ha8800_su',
-    'ha8800_ch',
-    'ha8800_lc',
-    'ha8800_tw',
-)
-
-default_firmwares = (
-    'ha8800_production',
-    'ha8801_production',
-    'ha2810_production',
-)
-
-default_firmware = default_firmwares[0]
-
-firmware = []
-options = {}
-
-def downloadMeta(firmware):
-    payload = {}
-    firmware_url = firmware_url_template.format(firmware)
-
-    if options['get_previous']:
-        payload = { 'previous' : "true" } 
-   
-    try:
-        res = requests.get(firmware_url, params=payload)
-    except requests.exceptions.RequestException as e:
-        logger.error(e.response.text)
-        return None
-
-    if res.status_code == requests.codes.ok:
-        if 'application/json' in res.headers.get('content-type'):
-            return res.json()
-        else:
-            logger.error('META @ {} was not JSON'.format(firmware_url))
             return None
     
 def fetchFirmware(firmware):
@@ -336,7 +268,7 @@ def firmwareFromModelRelease(model, release):
 
 os.umask(0o022)
 
-parser = argparse.ArgumentParser(description='Download Atgames firmwares')
+parser = argparse.ArgumentParser(description='Download ALU Apps')
 parser.add_argument('--verbose', '-v',
     action='store_true', dest='verbose', default=False,
     help='Enable verbose logging')
@@ -349,17 +281,13 @@ parser.add_argument('-q', '--quiet',
     action='store_false', dest='verbose', default=True,
     help='Do not print status messages to stdout')
 
+parser.add_argument('--uuid',  '-U',
+    action='store', dest='uuid', default=random_uuid,
+    help='UUID (default: %(default)s)')
+
 parser.add_argument('--model',  '-m',
     action='store', dest='model', default=default_model,
     help='ALU Model (default: %(default)s)')
-
-parser.add_argument('--release',  '-r',
-    action='store', dest='release', default=default_release,
-    help='ALU Release (default: %(default)s)')
-
-parser.add_argument('--previous',
-    action='store_true', dest='get_previous', default=False,
-    help='Download previous firmware (default: %(default)s)')
 
 parser.add_argument('--overwrite', '-o',
     action='store_true', dest='overwrite', default=False,
@@ -395,17 +323,13 @@ parser.add_argument('--list-models',
     action='store_true', dest='list_models', default=False,
     help='List models')
 
-parser.add_argument('--alt',
-    action='store_true', dest='alternatives', default=False,
-    help='Show Alternative Information')
-
 parser.add_argument('--output', '-O',
     action='store', dest='output', default=None,
     help='Output to a file')
 
 parser.add_argument('--server', '-s',
     action='store', dest='server', choices=['prod', 'staging', 'dev'], default='prod', 
-    help='Firmware repository (default: %(default)s)')
+    help='Appstore repository (default: %(default)s)')
 
 options = vars(parser.parse_args())
 
@@ -424,7 +348,7 @@ else:
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-logging.info("Hello")
+
 if options['list_models']:
     if options['alternatives']:
         model_lookup.update(alt_model_lookup)
